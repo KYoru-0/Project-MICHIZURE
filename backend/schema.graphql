@@ -1,0 +1,27 @@
+type Message {
+	id: ID!
+	content: String!
+	sender: String!
+	createdAt: AWSDateTime!
+}
+
+type Mutation {
+	sendMessage(
+		content: String!,
+		sender: String!,
+		apiKey: String,
+		model: String,
+		instruction: String,
+		sessionId: String!,
+		historyUntil: String
+	): Message
+}
+
+type Query {
+	listMessages: [Message]
+}
+
+type Subscription {
+	onSendMessage: Message
+		@aws_subscribe(mutations: ["sendMessage"])
+}

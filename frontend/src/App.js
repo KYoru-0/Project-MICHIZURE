@@ -1,62 +1,138 @@
 import React, { useState, useEffect } from 'react';
 import Navbar from './Navbar';
 import ChatUI from './ChatUI';
-import SettingsModal, { DEFAULT_INTRO } from './SettingsModal';
+import SettingsModal, { getIntroMessage } from './SettingsModal';
+import {
+  fetchSessionMessages,
+  getStoredPath,
+  normalizeStoredStep,
+  sendAppSyncMessage,
+  deleteAllTableMessages,
+} from './services/api';
 import './App.css';
 
-const CHAT_STORAGE_KEY = 'michizure_chat_messages';
+const SESSION_ID_KEY = 'michizure_session_id';
 
-function createFreshIntroMessage() {
-  const savedIntro = localStorage.getItem('michizure_intro_message');
-  const introText = savedIntro !== null ? savedIntro : DEFAULT_INTRO;
-
-  return {
-    id: 1,
-    sender: 'assistant',
-    text: introText,
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-  };
+function getOrCreateSessionId() {
+  let id = localStorage.getItem(SESSION_ID_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(SESSION_ID_KEY, id);
+  }
+  return id;
 }
 
-function getInitialMessages() {
-  try {
-    const saved = localStorage.getItem(CHAT_STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        // Ensure the very first message is updated to the latest configured intro on page load
-        const freshIntro = createFreshIntroMessage();
-        parsed[0] = {
-          ...parsed[0],
-          text: freshIntro.text,
-        };
-        return parsed;
-      }
-    }
-  } catch (err) {
-    console.error('Failed to parse saved chat messages:', err);
-  }
+function groupMessagesIntoTurns(rawMsgs) {
+  const storedPath = getStoredPath();
+  return rawMsgs
+    .map(normalizeStoredStep)
+    .filter((step) => step && step.variants.some(
+      (variant) => variant.text.trim() !== '' && variant.text !== '__EMPTY__'
+    ))
+    .map((step) => {
+      if (storedPath === null) return step;
+      const activeIndex = step.variants.findIndex((variant) => storedPath.includes(variant.id));
+      return activeIndex < 0 ? null : { ...step, activeIndex };
+    })
+    .filter(Boolean);
+}
 
-  return [createFreshIntroMessage()];
+function createIntroTurn(introText, customId = null) {
+  const id = customId || 'intro-' + Date.now();
+  return {
+    id,
+    sender: 'assistant',
+    activeIndex: 0,
+    variants: [
+      {
+        id,
+        text: introText,
+        senderRaw: 'AI (MICHIZURE)',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        isoTimestamp: new Date().toISOString(),
+      },
+    ],
+  };
 }
 
 function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [messages, setMessages] = useState(getInitialMessages);
+  const [messages, setMessages] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSending, setIsSending] = useState(false);
+  const [sessionId, setSessionId] = useState(getOrCreateSessionId);
 
-  // Sync chat messages to localStorage whenever messages change
-  useEffect(() => {
+  const startNewSession = async () => {
+    setIsSending(false); // abort any waiting state immediately
+    const newSessionId = crypto.randomUUID();
+    localStorage.setItem(SESSION_ID_KEY, newSessionId);
+    setSessionId(newSessionId);
+
+    localStorage.removeItem('michizure_history_until');
+
+    const introText = getIntroMessage();
+    const tempIntroTurn = createIntroTurn(introText, 'intro-session');
+
+    setMessages([tempIntroTurn]);
+
     try {
-      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
-    } catch (err) {
-      console.error('Failed to save chat messages:', err);
+      const saved = await sendAppSyncMessage({
+        content: introText,
+        sender: 'AI (MICHIZURE)',
+        apiKey: null,
+      });
+
+      const savedStep = normalizeStoredStep(saved);
+      if (savedStep && localStorage.getItem(SESSION_ID_KEY) === newSessionId) {
+        setMessages([savedStep]);
+      }
+    } catch {
+      return;
     }
-  }, [messages]);
+  };
+
+  useEffect(() => {
+    const loadingSessionId = localStorage.getItem(SESSION_ID_KEY);
+    async function syncFromDB() {
+      try {
+        if (!localStorage.getItem(SESSION_ID_KEY)) {
+          await startNewSession();
+          return;
+        }
+
+        const dbMessages = await fetchSessionMessages();
+        if (localStorage.getItem(SESSION_ID_KEY) !== loadingSessionId) return;
+        const turns = groupMessagesIntoTurns(dbMessages);
+        if (turns.length === 0) {
+          await startNewSession();
+        } else {
+          setMessages(turns);
+        }
+      } catch {
+        if (localStorage.getItem(SESSION_ID_KEY) !== loadingSessionId) return;
+        const introText = getIntroMessage();
+        setMessages([createIntroTurn(introText, 'intro-fallback')]);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    syncFromDB();
+  }, []);
 
   const handleRefreshChat = () => {
-    // When refreshed, reset to a single intro message using the latest saved intro
-    const freshChat = [createFreshIntroMessage()];
-    setMessages(freshChat);
+    startNewSession();
+  };
+
+  const handleClearChatCache = async () => {
+    localStorage.clear();
+    sessionStorage.clear();
+    await startNewSession();
+  };
+
+  const handleDeleteAllMessages = async () => {
+    await deleteAllTableMessages();
+    await startNewSession();
   };
 
   return (
@@ -64,9 +140,21 @@ function App() {
       <Navbar
         onOpenSettings={() => setIsSettingsOpen(true)}
         onRefreshChat={handleRefreshChat}
+        onClearChatCache={handleClearChatCache}
+        onDeleteAllMessages={handleDeleteAllMessages}
       />
       <main className="main-chat-area">
-        <ChatUI messages={messages} setMessages={setMessages} />
+        {isLoading ? (
+          <div className="loading-chat">Loading conversation…</div>
+        ) : (
+          <ChatUI
+            messages={messages}
+            setMessages={setMessages}
+            isSending={isSending}
+            setIsSending={setIsSending}
+            sessionId={sessionId}
+          />
+        )}
       </main>
       <SettingsModal
         isOpen={isSettingsOpen}

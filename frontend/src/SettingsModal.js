@@ -1,14 +1,33 @@
 import React, { useState, useEffect, useRef } from 'react';
 import arrowDownIcon from './assets/icons/arrow-down.svg';
+import {
+  DEFAULT_CHARACTER_PROMPT,
+  verifyOpenRouterKeyAndFetchModels,
+} from './services/api';
 import './Chat.css';
 
-const DEFAULT_INTRO = 'Welcome to Project:MICHIZURE! I am your AI companion. Feel free to ask anything or configure your API key in settings to get started.';
+const DEFAULT_INTRO = `*I give you a warm, welcoming hug.*
+Hey! How's your day going?`;
+const DEFAULT_MODEL = 'openrouter/free';
+
+export function getIntroMessage() {
+  const savedIntro = localStorage.getItem('michizure_intro_message');
+  return savedIntro !== null ? savedIntro : DEFAULT_INTRO;
+}
 
 function SettingsModal({ isOpen, onClose }) {
   const [activeTab, setActiveTab] = useState('provider'); // 'provider' | 'character'
   const [provider, setProvider] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [characterPrompt, setCharacterPrompt] = useState('');
+  const [models, setModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
+  const [modelSearch, setModelSearch] = useState('');
+  const [isModelListOpen, setIsModelListOpen] = useState(false);
+  const [verifiedKey, setVerifiedKey] = useState('');
+  const [verificationStatus, setVerificationStatus] = useState('idle');
+  const [verificationError, setVerificationError] = useState('');
+  const [initialApiKey, setInitialApiKey] = useState('');
+  const [characterPrompt, setCharacterPrompt] = useState(DEFAULT_CHARACTER_PROMPT);
   const [introMessage, setIntroMessage] = useState('');
   const [saved, setSaved] = useState(false);
   const mouseDownTargetRef = useRef(null);
@@ -16,10 +35,18 @@ function SettingsModal({ isOpen, onClose }) {
   useEffect(() => {
     if (isOpen) {
       setProvider(localStorage.getItem('michizure_provider') || '');
-      setApiKey(localStorage.getItem('michizure_api_key') || '');
-      setCharacterPrompt(localStorage.getItem('michizure_character_prompt') || '');
-      const savedIntro = localStorage.getItem('michizure_intro_message');
-      setIntroMessage(savedIntro !== null ? savedIntro : DEFAULT_INTRO);
+      const savedApiKey = localStorage.getItem('michizure_api_key') || '';
+      setApiKey(savedApiKey);
+      setInitialApiKey(savedApiKey);
+      setSelectedModel(localStorage.getItem('michizure_model') || DEFAULT_MODEL);
+      setModelSearch('');
+      setIsModelListOpen(false);
+      setModels([]);
+      setVerifiedKey('');
+      setVerificationStatus('idle');
+      setVerificationError('');
+      setCharacterPrompt(localStorage.getItem('michizure_character_prompt') || DEFAULT_CHARACTER_PROMPT);
+      setIntroMessage(getIntroMessage());
       setSaved(false);
     }
   }, [isOpen]);
@@ -30,6 +57,10 @@ function SettingsModal({ isOpen, onClose }) {
     localStorage.setItem('michizure_provider', provider);
     if (provider === 'openrouter') {
       localStorage.setItem('michizure_api_key', apiKey.trim());
+      if (selectedModel) localStorage.setItem('michizure_model', selectedModel);
+    } else {
+      localStorage.removeItem('michizure_api_key');
+      localStorage.removeItem('michizure_model');
     }
     localStorage.setItem('michizure_character_prompt', characterPrompt);
     localStorage.setItem('michizure_intro_message', introMessage);
@@ -40,6 +71,58 @@ function SettingsModal({ isOpen, onClose }) {
       onClose();
     }, 400);
   };
+
+  const handleVerifyApiKey = async () => {
+    const key = apiKey.trim();
+    if (!key) {
+      setVerificationStatus('error');
+      setVerificationError('Enter an OpenRouter API key first.');
+      return;
+    }
+
+    setVerificationStatus('loading');
+    setVerificationError('');
+    setVerifiedKey('');
+    setModels([]);
+    try {
+      const availableModels = await verifyOpenRouterKeyAndFetchModels(key);
+      setModels(availableModels);
+      const currentModel = localStorage.getItem('michizure_model') || DEFAULT_MODEL;
+      const retainedModel = availableModels.find((model) => model.id === selectedModel)
+        || availableModels.find((model) => model.id === currentModel);
+      const nextModel = retainedModel?.id || currentModel;
+      setSelectedModel(nextModel);
+      setModelSearch(retainedModel ? `${retainedModel.name} (${retainedModel.id})` : nextModel);
+      setVerifiedKey(key);
+      setVerificationStatus('success');
+    } catch (error) {
+      setVerificationStatus('error');
+      setVerificationError(error.message || 'Unable to verify the API key.');
+    }
+  };
+
+  const handleApiKeyChange = (value) => {
+    setApiKey(value);
+    setVerifiedKey('');
+    setModels([]);
+    setVerificationStatus('idle');
+    setVerificationError('');
+    setSelectedModel('');
+    setModelSearch('');
+    setIsModelListOpen(false);
+  };
+
+  const filteredModels = models.filter((model) =>
+    `${model.name} ${model.id}`.toLowerCase().includes(modelSearch.trim().toLowerCase())
+  );
+
+  const keyChanged = apiKey.trim() !== initialApiKey.trim();
+  const needsVerifiedKey = provider === 'openrouter' && keyChanged && apiKey.trim();
+  const canSave = verificationStatus !== 'loading'
+    && (!needsVerifiedKey || (
+      verifiedKey === apiKey.trim()
+      && (selectedModel === DEFAULT_MODEL || models.some((model) => model.id === selectedModel))
+    ));
 
   const handleMouseDown = (e) => {
     mouseDownTargetRef.current = e.target;
@@ -69,7 +152,6 @@ function SettingsModal({ isOpen, onClose }) {
           </button>
         </div>
 
-        {/* Tab Navigation */}
         <div className="modal-tabs">
           <button
             className={`modal-tab ${activeTab === 'provider' ? 'active' : ''}`}
@@ -126,9 +208,78 @@ function SettingsModal({ isOpen, onClose }) {
                     className="setting-input"
                     placeholder="sk-or-v1-..."
                     value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
+                    onChange={(e) => handleApiKeyChange(e.target.value)}
                     autoComplete="off"
                   />
+                  <button
+                    className="btn-secondary verify-api-key-btn"
+                    type="button"
+                    onClick={handleVerifyApiKey}
+                    disabled={verificationStatus === 'loading' || !apiKey.trim()}
+                  >
+                    {verificationStatus === 'loading' ? 'Verifying…' : 'Verify key and load models'}
+                  </button>
+                  {verificationStatus === 'success' && (
+                    <span className="setting-status success" role="status">
+                      Key verified. {models.length} text models available.
+                    </span>
+                  )}
+                  {verificationStatus === 'error' && (
+                    <span className="setting-status error" role="alert">
+                      {verificationError}
+                    </span>
+                  )}
+                  <label className="setting-label" htmlFor="model-select">Model</label>
+                  <span className="setting-desc">
+                    Type to filter the text models available for this API key.
+                  </span>
+                  <div className="model-picker">
+                    <input
+                      id="model-select"
+                      type="text"
+                      className="setting-input"
+                      value={modelSearch}
+                      disabled={verificationStatus !== 'success'}
+                      placeholder={verificationStatus === 'success' ? 'Search models…' : 'Verify key to load models'}
+                      autoComplete="off"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      aria-expanded={isModelListOpen && filteredModels.length > 0}
+                      aria-controls="model-options"
+                      onFocus={() => setIsModelListOpen(true)}
+                      onBlur={() => setTimeout(() => setIsModelListOpen(false), 120)}
+                      onChange={(e) => {
+                        setModelSearch(e.target.value);
+                        setSelectedModel('');
+                        setIsModelListOpen(true);
+                      }}
+                    />
+                    {isModelListOpen && filteredModels.length > 0 && (
+                      <div className="model-options" id="model-options" role="listbox">
+                        {filteredModels.slice(0, 100).map((model) => (
+                          <button
+                            key={model.id}
+                            className="model-option"
+                            type="button"
+                            role="option"
+                            aria-selected={model.id === selectedModel}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setSelectedModel(model.id);
+                              setModelSearch(`${model.name} (${model.id})`);
+                              setIsModelListOpen(false);
+                            }}
+                          >
+                            <span>{model.name}</span>
+                            <small>{model.id}</small>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {isModelListOpen && modelSearch && filteredModels.length === 0 && (
+                      <div className="model-options-empty" role="status">No matching models.</div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -136,7 +287,6 @@ function SettingsModal({ isOpen, onClose }) {
 
           {activeTab === 'character' && (
             <div className="tab-pane animate-fade">
-              {/* Intro Message */}
               <div className="setting-group">
                 <div className="setting-header-row">
                   <label className="setting-label" htmlFor="intro-textarea">
@@ -160,7 +310,6 @@ function SettingsModal({ isOpen, onClose }) {
                 />
               </div>
 
-              {/* Character Persona */}
               <div className="setting-group">
                 <div className="setting-header-row">
                   <label className="setting-label" htmlFor="character-textarea">
@@ -191,7 +340,7 @@ function SettingsModal({ isOpen, onClose }) {
           <button className="btn-secondary" onClick={onClose} type="button">
             Cancel
           </button>
-          <button className="btn-primary" onClick={handleSave} type="button">
+          <button className="btn-primary" onClick={handleSave} type="button" disabled={!canSave}>
             {saved ? 'Saved!' : 'Save'}
           </button>
         </div>
